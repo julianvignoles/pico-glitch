@@ -22,7 +22,8 @@ button{font-family:inherit;color:inherit;}
 button:focus-visible,input:focus-visible,.nav:focus-visible{outline:2px solid var(--teal);outline-offset:2px;}
 .hidden{display:none !important;}
 
-#city{position:fixed;inset:0;width:100%;height:100%;image-rendering:pixelated;image-rendering:crisp-edges;z-index:0;}
+#city{position:fixed;inset:0;overflow:hidden;z-index:0;background:var(--night);contain:strict;}
+#city canvas{position:absolute;left:0;top:0;image-rendering:pixelated;image-rendering:crisp-edges;will-change:transform;}
 #scan{position:fixed;inset:0;pointer-events:none;z-index:90;
   background:repeating-linear-gradient(0deg,rgba(0,0,0,0) 0 2px,rgba(0,0,0,.16) 3px,rgba(0,0,0,.16) 4px),
              radial-gradient(ellipse at center,rgba(0,0,0,0) 60%,rgba(4,2,12,.55) 100%);}
@@ -114,7 +115,7 @@ button:focus-visible,input:focus-visible,.nav:focus-visible{outline:2px solid va
 .key.miss{background:#120f26;color:#3f3a66;}
 
 /* ---------- UPLINK ---------- */
-.up{flex:1;min-height:0;display:grid;grid-template-columns:1fr 200px;gap:0;}
+.up{flex:1;min-height:0;display:grid;grid-template-columns:1fr 240px;gap:0;}
 .upmain{display:flex;flex-direction:column;min-height:0;padding:0 18px 14px;}
 .cats{display:flex;gap:6px;flex-wrap:wrap;padding:6px 0 12px;}
 .cats .chip.star{color:var(--clawd);border-color:rgba(217,119,87,.5);}
@@ -150,7 +151,8 @@ button:focus-visible,input:focus-visible,.nav:focus-visible{outline:2px solid va
 .towerwrap{border-left:1px solid var(--line);display:flex;flex-direction:column;align-items:stretch;min-height:0;}
 #tower{flex:1;min-height:0;width:100%;image-rendering:pixelated;display:block;}
 .alt{padding:8px 10px;border-top:1px solid var(--line);text-align:center;}
-.alt b{display:block;font-size:24px;color:var(--amber);letter-spacing:2px;}
+.alt b{display:block;font-size:24px;color:var(--amber);letter-spacing:2px;transition:transform .15s,text-shadow .15s;font-variant-numeric:tabular-nums;}
+.alt b.ticking{transform:scale(1.18);text-shadow:0 0 12px rgba(255,181,71,.7);}
 .alt span{font-size:10px;letter-spacing:2px;color:var(--dim);text-transform:uppercase;}
 
 /* ---------- SPLICE / WORDLE boards ---------- */
@@ -221,7 +223,7 @@ button:focus-visible,input:focus-visible,.nav:focus-visible{outline:2px solid va
 </style>
 </head>
 <body>
-<canvas id="city"></canvas>
+<div id="city" aria-hidden="true"></div>
 <div id="scan"></div>
 <div id="wipe"></div>
 
@@ -271,7 +273,7 @@ button:focus-visible,input:focus-visible,.nav:focus-visible{outline:2px solid va
             </div>
           </div>
         </div>
-        <div class="towerwrap"><canvas id="tower" width="80" height="240"></canvas><div class="alt"><b id="upAlt">0 m</b><span id="upRank">street level</span></div></div>
+        <div class="towerwrap"><canvas id="tower"></canvas><div class="alt"><b id="upAlt">0 m</b><span id="upRank">street level</span></div></div>
       </div>
     </section>
 

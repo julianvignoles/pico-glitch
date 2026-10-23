@@ -87,55 +87,84 @@ A.clawdDataURL = function(scale, frame, opts){
 A.rng = function(a){ return function(){ a|=0; a=a+0x6D2B79F5|0; var t=Math.imul(a^a>>>15,1|a); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; };
 
 // ---------- night city ----------
+// Built for smooth motion on slow laptops (Chromebooks): every layer is its own
+// small pixel-art canvas, drawn rarely, and slid around with CSS transforms,
+// which the GPU handles. Per frame we only update a handful of transforms.
+// Positions are rounded to whole screen pixels so the art stays crisp.
 var City = A.City = {};
-var cv, ctx, W=320, H=180, scale=4, running=false, t0=0, last=0, layers=[], cars=[], drops=[], stars=[];
+var root, VW=0, VH=0, W=320, H=180, scale=4, running=false, t0=0, last=0, slowAt=-1;
 var reduce = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
-var sky = null, clawd = {x:-20, dir:1, hop:0, idle:0}, blimp = {x:400}, signs = [];
+var sky=null, layers=[], cars=[], blimp=null, walker=null, rain=null, stars=[], skyBase=null;
 var SIGN_WORDS = ["RAMEN","24H","HOTEL","OPEN","NOODLE","ARCADE","BAR","SHIP IT","> _","TACO","PHO","CAFE","LOFT","DINER","GYM","CLIMB","BOULDER","KARAOKE"];
 var NEON = [P.pink,P.teal,P.amber,P.violet,P.clawd];
 
+function mk(w, h, cssScale){
+  var c=document.createElement("canvas"); c.width=Math.max(1,Math.ceil(w)); c.height=Math.max(1,Math.ceil(h));
+  c.style.width=(c.width*cssScale)+"px"; c.style.height=(c.height*cssScale)+"px";
+  root.appendChild(c); return c;
+}
+function move(el, x, y){ el.style.transform = "translate3d("+Math.round(x)+"px,"+Math.round(y)+"px,0)"; }
+
 function resize(){
-  var vw = window.innerWidth, vh = window.innerHeight;
-  scale = Math.max(2, Math.round(vh/200));
-  W = Math.ceil(vw/scale); H = Math.ceil(vh/scale);
-  cv.width = W; cv.height = H;
+  VW = window.innerWidth; VH = window.innerHeight;
+  scale = Math.max(2, Math.round(VH/200));
+  W = Math.ceil(VW/scale); H = Math.ceil(VH/scale);
   build();
 }
 
 function build(){
   var r = A.rng(1337);
-  // sky gradient with ordered dithering
-  sky = document.createElement("canvas"); sky.width=W; sky.height=H;
-  var sc = sky.getContext("2d");
-  var bands = [P.night,P.sky1,P.sky2,P.sky3,P.haze];
-  var bayer=[0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5];
+  root.innerHTML = "";
+  // ---- sky (gradient + moon baked; stars and searchlights redrawn a few times a second)
+  skyBase = document.createElement("canvas"); skyBase.width=W; skyBase.height=H;
+  var sc = skyBase.getContext("2d");
+  var bands = [P.night,P.sky1,P.sky2,P.sky3,P.haze], bayer=[0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5];
   for(var y=0;y<H;y++){
     var f = Math.pow(y/H,1.6)*(bands.length-1), i=Math.floor(f), fr=f-i;
-    for(var x=0;x<W;x++){
-      var b = (fr*16 > bayer[(y%4)*4+(x%4)]) ? Math.min(i+1,bands.length-1) : i;
-      sc.fillStyle = bands[b]; sc.fillRect(x,y,1,1);
-    }
+    for(var x=0;x<W;x++){ sc.fillStyle = bands[(fr*16 > bayer[(y%4)*4+(x%4)]) ? Math.min(i+1,bands.length-1) : i]; sc.fillRect(x,y,1,1); }
   }
-  stars = []; for(var s=0;s<Math.floor(W*H/900);s++) stars.push({x:Math.floor(r()*W), y:Math.floor(r()*H*0.45), p:r()*6.28, b:r()<0.15});
-  // three building layers, each a tile 2x screen wide for seamless scrolling
-  layers = [
-    mkLayer(r, {base:H*0.42, var:H*0.22, wmin:10, wmax:22, color:P.far, win:P.farWin, winRate:0.12, speed:1.5, signs:false}),
-    mkLayer(r, {base:H*0.30, var:H*0.25, wmin:14, wmax:30, color:P.mid, win:null, winRate:0.30, speed:4, signs:true}),
-    mkLayer(r, {base:H*0.14, var:H*0.06, wmin:26, wmax:50, color:P.near, win:null, winRate:0.10, speed:9, signs:false, roof:true})
-  ];
-  cars=[]; for(var c=0;c<5;c++) cars.push(newCar(r, true));
-  drops=[]; for(var d=0;d<Math.floor(W*H/260);d++) drops.push({x:r()*W, y:r()*H, l:2+Math.floor(r()*4), v:90+r()*60});
+  var mx=Math.floor(W*0.78), my=Math.floor(H*0.16), mr=Math.max(7,Math.floor(H*0.06));
+  sc.fillStyle="rgba(243,230,200,0.06)"; sc.beginPath(); sc.arc(mx,my,mr*2.2,0,6.29); sc.fill();
+  sc.fillStyle=P.moon; for(var yy=-mr;yy<=mr;yy++){ var hw=Math.floor(Math.sqrt(mr*mr-yy*yy)); sc.fillRect(mx-hw,my+yy,hw*2,1); }
+  sc.fillStyle="#d9c9a6"; sc.fillRect(mx-3,my-2,3,2); sc.fillRect(mx+2,my+3,2,2); sc.fillRect(mx-1,my+4,1,1);
+  stars = []; for(var s=0;s<Math.floor(W*H/900);s++) stars.push({x:Math.floor(r()*W), y:Math.floor(r()*H*0.45), p:r()*6.28});
+  sky = mk(W, H, scale);
+
+  // ---- far skyline, then flying cars + blimp, then mid skyline, haze, near rooftops
+  var far = mkLayer(r, {base:H*0.42, var:H*0.22, wmin:10, wmax:22, color:P.far, win:P.farWin, winRate:0.12, speed:1.2, signs:false});
+  blimp = {x: W*0.7, cv: mk(58, 18, scale)};
+  cars = []; for(var c=0;c<5;c++) cars.push(newCar(r, true));
+  var mid = mkLayer(r, {base:H*0.30, var:H*0.25, wmin:14, wmax:30, color:P.mid, win:null, winRate:0.30, speed:3, signs:true});
+  var haze = document.createElement("div"); haze.style.cssText="position:absolute;left:0;right:0;bottom:0;height:28%;background:rgba(106,42,85,0.10)"; root.appendChild(haze);
+  var near = mkLayer(r, {base:H*0.14, var:H*0.06, wmin:26, wmax:50, color:P.near, win:null, winRate:0.10, speed:6, signs:false, roof:true});
+  layers = [far, mid, near];
+  // ---- Clawd walking the rooftops
+  walker = {x:-20, dir:1, hop:0, idle:0, key:"", cv: mk(28, 24, scale)};
+  // ---- rain: one pre-drawn sheet that slides down and wraps
+  rain = null;
+  if(!reduce){
+    var tile = 160*scale, rc = document.createElement("canvas");
+    rc.width = VW + 120; rc.height = VH + tile;
+    rc.style.width = rc.width+"px"; rc.style.height = rc.height+"px"; rc.style.imageRendering="auto";
+    var g = rc.getContext("2d"); g.fillStyle = "rgba(160,170,255,0.26)";
+    var n = Math.floor(rc.width*tile/9000), pw = Math.max(1, scale-2);
+    for(var d=0; d<n; d++){
+      var dx = Math.floor(r()*rc.width), dy = Math.floor(r()*tile), len = (2+Math.floor(r()*4))*scale;
+      for(var rep=dy-tile; rep<rc.height; rep+=tile) g.fillRect(dx, rep, pw, len);
+    }
+    root.appendChild(rc); rain = {cv:rc, tile:tile};
+  }
+  drawSlow(0);
 }
 
 function mkLayer(r, o){
-  var tileW = Math.max(W*2, 480), L = {o:o, tileW:tileW, bld:[], cache:null};
+  var tileW = Math.max(W*2, 480), L = {o:o, tileW:tileW, bld:[], live:[], tile:null, cv:null};
   var x = 0;
   while(x < tileW){
     var w = Math.floor(o.wmin + r()*(o.wmax-o.wmin));
     if(x + w > tileW) w = tileW - x;
     var h = Math.floor(o.base + r()*o.var);
     var b = {x:x, w:w, h:h, wins:[], ant: r()<0.35, tower: r()<0.2, sign:null, tank:o.roof && r()<0.35, ac:o.roof && r()<0.5};
-    // windows
     for(var wy=H-h+4; wy<H-2; wy+=4) for(var wx=x+2; wx<x+w-2; wx+=3){
       if(r()<o.winRate) b.wins.push({x:wx,y:wy, c: o.win || (r()<0.75 ? (r()<0.6?P.amber:P.warm) : P.teal), f: r()<0.08 ? r()*10 : -1});
     }
@@ -145,139 +174,149 @@ function mkLayer(r, o){
       var fitsV = SIGN_WORDS.filter(function(s){ return s.indexOf(" ")<0 && s.length<=6 && s.length*8+1 <= h*0.6; });
       var vertical = fitsV.length && (r()<0.5 || !fitsH.length);
       var list = vertical ? fitsV : fitsH;
-      if(!list.length){ L.bld.push(b); x += w; continue; }
-      var word = list[Math.floor(r()*list.length)];
-      b.sign = {word:word, vertical:vertical, color:NEON[Math.floor(r()*NEON.length)], y: H-h+6+Math.floor(r()*Math.max(1,h*0.4)), ph:r()*10, flick:r()<0.25};
+      if(list.length){
+        var word = list[Math.floor(r()*list.length)];
+        b.sign = {word:word, vertical:vertical, color:NEON[Math.floor(r()*NEON.length)], y: H-h+6+Math.floor(r()*Math.max(1,h*0.4)), ph:r()*10, flick:r()<0.25};
+      }
     }
     L.bld.push(b); x += w + (o.roof ? Math.floor(r()*6) : (r()<0.3?1:0));
   }
+  bakeLayer(L);
+  // visible canvas holds two copies of the tile side by side, so sliding wraps seamlessly
+  L.cv = mk(tileW*2, H+12, scale);
+  L.cv.style.top = (-12*scale)+"px";
   return L;
 }
 
-function newCar(r, anywhere){
-  var dir = r()<0.5?1:-1;
-  return {x: anywhere ? r()*W : (dir>0?-12:W+12), y: H*0.18 + r()*H*0.38, v:(18+r()*30)*dir, c: r()<0.5?P.teal:P.pink};
+// Pre-draw everything about a layer that never changes. Blinking bits go in L.live.
+function bakeLayer(L){
+  var o=L.o, c=document.createElement("canvas"); c.width=L.tileW; c.height=H+12;
+  var g=c.getContext("2d"); g.translate(0,12);
+  L.bld.forEach(function(b,i){
+    var bx=b.x;
+    g.fillStyle=o.color; g.fillRect(bx, H-b.h, b.w, b.h);
+    if(b.tower) g.fillRect(bx+Math.floor(b.w/2)-2, H-b.h-6, 4, 6);
+    if(b.ant){ g.fillRect(bx+3, H-b.h-10, 1, 10); L.live.push({k:"ant", x:bx+3, y:H-b.h-11, ph:i}); }
+    if(b.tank){ g.fillRect(bx+b.w-12, H-b.h-9, 8, 6); g.fillRect(bx+b.w-11, H-b.h-3, 1, 3); g.fillRect(bx+b.w-6, H-b.h-3, 1, 3); }
+    if(b.ac){ g.fillStyle="#141128"; g.fillRect(bx+4, H-b.h-3, 6, 3); }
+    b.wins.forEach(function(wn){
+      g.fillStyle=wn.c; g.fillRect(wn.x, wn.y, 1, 2);
+      if(wn.f>=0) L.live.push({k:"win", x:wn.x, y:wn.y, ph:wn.f, c:o.color});
+    });
+    if(b.sign){
+      var s=b.sign, sw, sh, sx;
+      if(s.vertical){ sw=7; sh=s.word.length*8+1; sx=bx+2; } else { sw=A.textWidth(s.word,1)+4; sh=11; sx=bx+Math.max(1,Math.floor((b.w-sw)/2)); }
+      g.globalAlpha=0.18; g.fillStyle=s.color; g.fillRect(sx-2,s.y-2,sw+4,sh+4); g.globalAlpha=1;
+      g.fillStyle="#07060f"; g.fillRect(sx, s.y, sw, sh);
+      g.fillStyle=s.color; g.fillRect(sx,s.y,sw,1); g.fillRect(sx,s.y+sh-1,sw,1);
+      if(s.vertical){ for(var k=0;k<s.word.length;k++) A.drawText(g, s.word[k], sx+1, s.y+2+k*8, 1, s.color); }
+      else A.drawText(g, s.word, sx+2, s.y+2, 1, s.color);
+      if(s.flick) L.live.push({k:"sign", x:sx, y:s.y, w:sw, h:sh, ph:s.ph});
+    }
+  });
+  L.tile=c;
 }
 
-function drawLayer(L, t){
-  var o=L.o, off = (t*o.speed) % L.tileW;
-  for(var k=0;k<2;k++){
-    var base = -off + k*L.tileW;
-    for(var i=0;i<L.bld.length;i++){
-      var b=L.bld[i], bx=Math.floor(base+b.x);
-      if(bx > W || bx + b.w < 0) continue;
-      ctx.fillStyle=o.color; ctx.fillRect(bx, H-b.h, b.w, b.h);
-      if(b.tower){ ctx.fillRect(bx+Math.floor(b.w/2)-2, H-b.h-6, 4, 6); }
-      if(b.ant){ ctx.fillRect(bx+3, H-b.h-10, 1, 10); if(Math.sin(t*3+i)>0.2){ ctx.fillStyle=P.red; ctx.fillRect(bx+3, H-b.h-11, 1, 1);} }
-      if(b.tank){ ctx.fillStyle=o.color; ctx.fillRect(bx+b.w-12, H-b.h-9, 8, 6); ctx.fillRect(bx+b.w-11, H-b.h-3, 1, 3); ctx.fillRect(bx+b.w-6, H-b.h-3, 1, 3); }
-      if(b.ac){ ctx.fillStyle="#141128"; ctx.fillRect(bx+4, H-b.h-3, 6, 3); }
-      for(var w=0;w<b.wins.length;w++){
-        var wn=b.wins[w];
-        if(wn.f>=0 && Math.sin(t*0.7+wn.f)>0.6) continue;
-        ctx.fillStyle=wn.c; ctx.fillRect(Math.floor(base+wn.x), wn.y, 1, 2);
+function newCar(r, anywhere){
+  var dir = r()<0.5?1:-1, col = r()<0.5?P.teal:P.pink;
+  var car = {x: anywhere ? r()*W : (dir>0?-18:W+18), y: Math.floor(H*0.18 + r()*H*0.38), v:(14+r()*22)*dir, cv:null};
+  var cv = car.cv = mk(16, 3, scale), g = cv.getContext("2d");
+  // body at one end, light trail behind it
+  var bx = dir>0 ? 11 : 0, tx = dir>0 ? 0 : 6;
+  g.globalAlpha=0.35; g.fillStyle=col; g.fillRect(tx, 2, 10, 1); g.globalAlpha=1;
+  g.fillStyle="#1b1733"; g.fillRect(bx,1,5,2); g.fillStyle="#2c2650"; g.fillRect(bx+1,0,3,1);
+  g.fillStyle = dir>0 ? P.warm : P.red; g.fillRect(dir>0 ? bx+4 : bx, 1, 1, 1);
+  // keep the car in its layer slot: insert right after the blimp canvas
+  if(blimp && blimp.cv.nextSibling) root.insertBefore(cv, blimp.cv.nextSibling);
+  return car;
+}
+
+// Things that only need a few redraws per second: twinkles, blinking windows,
+// flickering signs, the blimp's scrolling text.
+function drawSlow(t){
+  var g = sky.getContext("2d");
+  g.drawImage(skyBase,0,0);
+  for(var i=0;i<stars.length;i++){ var s=stars[i]; g.fillStyle = Math.sin(t*1.5+s.p)>0.3 ? "#cfc6ff" : "#5d55a0"; g.fillRect(s.x,s.y,1,1); }
+  g.globalAlpha=0.05; g.fillStyle=P.teal;
+  for(var k=0;k<2;k++){ var a=Math.sin(t*0.22+k*2)*0.5 + (k?0.4:-0.4), sx=W*(k?0.7:0.25);
+    g.beginPath(); g.moveTo(sx,H); g.lineTo(sx+Math.sin(a)*H*1.4-14, H-Math.cos(a)*H*1.4); g.lineTo(sx+Math.sin(a)*H*1.4+14, H-Math.cos(a)*H*1.4); g.fill(); }
+  g.globalAlpha=1;
+  layers.forEach(function(L){
+    var lg = L.cv.getContext("2d");
+    lg.drawImage(L.tile, 0, 0); lg.drawImage(L.tile, L.tileW, 0);
+    for(var rep=0; rep<2; rep++){
+      var ox = rep*L.tileW;
+      for(var j=0;j<L.live.length;j++){
+        var e=L.live[j];
+        if(e.k==="ant"){ if(Math.sin(t*3+e.ph)>0.2){ lg.fillStyle=P.red; lg.fillRect(ox+e.x, e.y+12, 1, 1); } }
+        else if(e.k==="win"){ if(Math.sin(t*0.7+e.ph)>0.6){ lg.fillStyle=e.c; lg.fillRect(ox+e.x, e.y+12, 1, 2); } }
+        else if(e.k==="sign"){ if(!(Math.sin(t*9+e.ph)>-0.7 || Math.sin(t*1.3+e.ph)>0)){ lg.fillStyle="rgba(7,6,15,0.85)"; lg.fillRect(ox+e.x+1, e.y+13, e.w-2, e.h-2); } }
       }
-      if(b.sign) drawSign(b, bx, t);
+    }
+  });
+  // blimp
+  var bg = blimp.cv.getContext("2d"); bg.clearRect(0,0,58,18);
+  bg.fillStyle="#24203f";
+  bg.fillRect(4,2,44,1); bg.fillRect(1,3,50,1); bg.fillRect(0,4,52,9); bg.fillRect(1,13,50,1); bg.fillRect(4,14,44,1);
+  bg.fillRect(50,0,6,3); bg.fillRect(50,13,6,3); bg.fillRect(20,15,12,3);
+  bg.fillStyle="#07060f"; bg.fillRect(4,5,42,7);
+  var msg = "  SHIP IT  //  STAY CURIOUS  //  TOUCH GRASS  //  ", off = Math.floor(t*10) % (msg.length*6);
+  bg.save(); bg.beginPath(); bg.rect(4,5,42,7); bg.clip(); A.drawText(bg, msg+msg, 4-off, 5, 1, P.amber); bg.restore();
+  if(Math.sin(t*4)>0){ bg.fillStyle=P.red; bg.fillRect(55,0,1,1); }
+}
+
+function drawWalker(t){
+  var w = walker, jy = w.hop>0 ? Math.sin((0.5-w.hop)/0.5*Math.PI)*8 : 0;
+  var walking = w.idle<=0, fr = walking ? (Math.floor(t*6)%2 ? "walkA":"walkB") : "stand";
+  var blink = (t % 3.2) < 0.12, key = fr+(blink?1:0)+(w.dir<0?1:0)+(jy>4?1:0)+(walking?1:0)+(Math.sin(t*6)>0?1:0);
+  if(key!==w.key){
+    w.key=key; var g=w.cv.getContext("2d"); g.clearRect(0,0,28,24);
+    A.drawClawd(g, 0, 12, 1, fr, {flip: w.dir<0, blink:blink, armsUp: jy>4});
+    if(!walking){ // little terminal thought bubble
+      g.fillStyle="#07060f"; g.fillRect(13,0,13,9); g.fillStyle=P.teal; g.fillRect(13,0,13,1);
+      g.fillStyle=P.ink; g.fillRect(15,3,1,1); g.fillRect(16,4,1,1); g.fillRect(15,5,1,1);
+      if(Math.sin(t*6)>0) g.fillRect(18,6,4,1);
     }
   }
+  move(w.cv, w.x*scale, (H-24-jy)*scale);
 }
 
-function drawSign(b, bx, t){
-  var s=b.sign, on = !s.flick || Math.sin(t*9+s.ph)>-0.7 || Math.sin(t*1.3+s.ph)>0;
-  var x, y = s.y, w, h;
-  if(s.vertical){ w=7; h=s.word.length*8+1; x=bx+2; } else { w=A.textWidth(s.word,1)+4; h=11; x=bx+Math.max(1,Math.floor((b.w-w)/2)); }
-  ctx.fillStyle="#07060f"; ctx.fillRect(x, y, w, h);
-  if(!on){ ctx.fillStyle="#2a2440"; ctx.fillRect(x,y,w,1); return; }
-  ctx.globalAlpha=0.18; ctx.fillStyle=s.color; ctx.fillRect(x-2,y-2,w+4,h+4); ctx.globalAlpha=1;
-  ctx.fillStyle=s.color; ctx.fillRect(x,y,w,1); ctx.fillRect(x,y+h-1,w,1);
-  if(s.vertical){ for(var i=0;i<s.word.length;i++) A.drawText(ctx, s.word[i], x+1, y+2+i*8, 1, s.color); }
-  else A.drawText(ctx, s.word, x+2, y+2, 1, s.color);
+function update(t, dt){
+  // a few redraws per second for blinking things
+  var slow = Math.floor(t*8);
+  if(slow!==slowAt){ slowAt=slow; drawSlow(t); }
+  // slide layers (GPU)
+  layers.forEach(function(L){ move(L.cv, -((t*L.o.speed) % L.tileW)*scale, 0); });
+  blimp.x -= dt*5; if(blimp.x < -60) blimp.x = W + 30;
+  move(blimp.cv, blimp.x*scale, Math.floor(H*0.12)*scale);
+  for(var c=0;c<cars.length;c++){
+    var car=cars[c]; car.x += car.v*dt;
+    if(car.x>W+20 || car.x<-20){ root.removeChild(car.cv); cars[c]=car=newCar(Math.random,false); }
+    move(car.cv, (car.x-(car.v>0?11:0))*scale, car.y*scale);
+  }
+  var w=walker;
+  if(w.idle>0) w.idle-=dt;
+  else { w.x += w.dir*dt*12; if(Math.random()<dt*0.12) w.idle = 1.5+Math.random()*2; if(w.hop<=0 && Math.random()<dt*0.25) w.hop = 0.5; }
+  if(w.hop>0) w.hop -= dt;
+  if(w.x > W+20) w.dir=-1; if(w.x < -30) w.dir=1;
+  drawWalker(t);
+  if(rain) move(rain.cv, -((t*14*scale) % 120), ((t*120*scale) % rain.tile) - rain.tile);
 }
 
 function frame(now){
   if(!running) return;
   requestAnimationFrame(frame);
-  var t = (now - t0)/1000, dt = Math.min(0.05, (now-last)/1000 || 0.016); last = now;
-  if(reduce) t *= 0.25;
-  render(t, dt);
+  var dt = Math.min(0.05, (now-last)/1000 || 0.016); last = now;
+  var t = (now - t0)/1000 * (reduce ? 0.25 : 1);
+  update(t, reduce ? dt*0.25 : dt);
 }
 
-function render(t, dt){
-  ctx.drawImage(sky,0,0);
-  // stars
-  for(var i=0;i<stars.length;i++){ var s=stars[i]; ctx.fillStyle = Math.sin(t*1.5+s.p)>0.3 ? "#cfc6ff" : "#5d55a0"; ctx.fillRect(s.x,s.y,1,1); }
-  // moon
-  var mx=Math.floor(W*0.78), my=Math.floor(H*0.16), mr=Math.max(7,Math.floor(H*0.06));
-  ctx.fillStyle="rgba(243,230,200,0.08)"; ctx.beginPath(); ctx.arc(mx,my,mr*2.2,0,6.29); ctx.fill();
-  ctx.fillStyle=P.moon; for(var yy=-mr;yy<=mr;yy++){ var hw=Math.floor(Math.sqrt(mr*mr-yy*yy)); ctx.fillRect(mx-hw,my+yy,hw*2,1); }
-  ctx.fillStyle="#d9c9a6"; ctx.fillRect(mx-3,my-2,3,2); ctx.fillRect(mx+2,my+3,2,2); ctx.fillRect(mx-1,my+4,1,1);
-  // searchlights
-  ctx.globalAlpha=0.06; ctx.fillStyle=P.teal;
-  for(var k=0;k<2;k++){ var a=Math.sin(t*0.25+k*2)*0.5 + (k?0.4:-0.4), sx=W*(k?0.7:0.25);
-    ctx.beginPath(); ctx.moveTo(sx,H); ctx.lineTo(sx+Math.sin(a)*H*1.4-14, H-Math.cos(a)*H*1.4); ctx.lineTo(sx+Math.sin(a)*H*1.4+14, H-Math.cos(a)*H*1.4); ctx.fill(); }
-  ctx.globalAlpha=1;
-  drawLayer(layers[0], t);
-  // blimp
-  blimp.x -= dt*6; if(blimp.x < -90) blimp.x = W + 60;
-  drawBlimp(Math.floor(blimp.x), Math.floor(H*0.12), t);
-  // flying cars
-  for(var c=0;c<cars.length;c++){ var car=cars[c]; car.x += car.v*dt;
-    if(car.x>W+20 || car.x<-20){ cars[c]=newCar(Math.random,false); continue; }
-    var cx=Math.floor(car.x), cy=Math.floor(car.y);
-    ctx.globalAlpha=0.35; ctx.fillStyle=car.c; ctx.fillRect(car.v>0?cx-10:cx+5, cy+1, 10, 1); ctx.globalAlpha=1;
-    ctx.fillStyle="#1b1733"; ctx.fillRect(cx,cy,5,2); ctx.fillStyle="#2c2650"; ctx.fillRect(cx+1,cy-1,3,1);
-    ctx.fillStyle=car.v>0?P.warm:P.red; ctx.fillRect(car.v>0?cx+4:cx, cy, 1, 1);
-  }
-  drawLayer(layers[1], t);
-  // haze between mid and near
-  ctx.fillStyle="rgba(106,42,85,0.10)"; ctx.fillRect(0,H*0.72,W,H*0.28);
-  drawLayer(layers[2], t);
-  drawStreetClawd(t, dt);
-  // rain
-  if(!reduce){ ctx.fillStyle="rgba(160,170,255,0.28)";
-    for(var d=0;d<drops.length;d++){ var dr=drops[d]; dr.y+=dr.v*dt; dr.x-=dr.v*dt*0.18; if(dr.y>H){dr.y=-5; dr.x=Math.random()*(W+20);} if(dr.x<0) dr.x+=W;
-      for(var q=0;q<dr.l;q++) ctx.fillRect(Math.floor(dr.x - q*0.18), Math.floor(dr.y - q), 1, 1); } }
-}
-
-function drawBlimp(x, y, t){
-  ctx.fillStyle="#24203f";
-  ctx.fillRect(x+4,y,44,1); ctx.fillRect(x+1,y+1,50,1); ctx.fillRect(x,y+2,52,9); ctx.fillRect(x+1,y+11,50,1); ctx.fillRect(x+4,y+12,44,1);
-  ctx.fillRect(x+50,y-2,6,3); ctx.fillRect(x+50,y+11,6,3);
-  ctx.fillRect(x+20,y+13,12,3);
-  ctx.fillStyle="#07060f"; ctx.fillRect(x+4,y+3,42,7);
-  var msg = "  SHIP IT  //  STAY CURIOUS  //  TOUCH GRASS  //  ", off = Math.floor(t*10) % (msg.length*6);
-  ctx.save(); ctx.beginPath(); ctx.rect(x+4,y+3,42,7); ctx.clip();
-  A.drawText(ctx, msg+msg, x+4-off, y+3, 1, P.amber); ctx.restore();
-  if(Math.sin(t*4)>0){ ctx.fillStyle=P.red; ctx.fillRect(x+55,y-2,1,1); }
-}
-
-function drawStreetClawd(t, dt){
-  // Clawd strolls along the near rooftops, stops to look around, hops sometimes
-  var groundY = H - 12;
-  if(clawd.idle>0){ clawd.idle-=dt; }
-  else {
-    clawd.x += clawd.dir*dt*14;
-    if(Math.random()<dt*0.12) clawd.idle = 1.5+Math.random()*2;
-    if(clawd.hop<=0 && Math.random()<dt*0.25) clawd.hop = 0.5;
-  }
-  if(clawd.hop>0) clawd.hop -= dt;
-  if(clawd.x > W+20){ clawd.dir=-1; }
-  if(clawd.x < -30){ clawd.dir=1; }
-  var jy = clawd.hop>0 ? Math.floor(Math.sin((0.5-clawd.hop)/0.5*Math.PI)*8) : 0;
-  var walking = clawd.idle<=0;
-  var fr = walking ? (Math.floor(t*6)%2 ? "walkA":"walkB") : "stand";
-  var blink = (t % 3.2) < 0.12;
-  ctx.fillStyle="rgba(0,0,0,0.5)"; ctx.fillRect(Math.floor(clawd.x)+2, groundY+10, 9, 1);
-  A.drawClawd(ctx, Math.floor(clawd.x), groundY - jy, 1, fr, {flip: clawd.dir<0, blink:blink, armsUp: jy>4});
-  if(!walking){ // little terminal thought bubble
-    var bx=Math.floor(clawd.x)+12, by=groundY-12;
-    ctx.fillStyle="#07060f"; ctx.fillRect(bx,by,13,9); ctx.fillStyle=P.teal; ctx.fillRect(bx,by,13,1);
-    ctx.fillStyle=P.ink; ctx.fillRect(bx+2,by+3,1,1); ctx.fillRect(bx+3,by+4,1,1); ctx.fillRect(bx+2,by+5,1,1);
-    if(Math.sin(t*6)>0) ctx.fillRect(bx+5,by+6,4,1);
-  }
-}
-
-City.init = function(canvas){ cv=canvas; ctx=cv.getContext("2d"); resize(); window.addEventListener("resize", function(){ resize(); if(!running) render(0,0); }); render(0,0); };
+City.init = function(el){
+  root = el;
+  resize(); update(0,0);
+  var rt=null; window.addEventListener("resize", function(){ clearTimeout(rt); rt=setTimeout(function(){ resize(); update((performance.now()-t0)/1000,0); }, 120); });
+};
 City.start = function(){ if(running) return; running=true; t0=performance.now(); last=t0; requestAnimationFrame(frame); };
 City.stop = function(){ running=false; };
-City.still = function(){ render(0,0); };
+City.still = function(){ slowAt=-1; update(0,0); };
 })();

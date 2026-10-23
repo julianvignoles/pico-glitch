@@ -24,7 +24,7 @@ function rankFor(m){ var r=RANKS[0][1]; RANKS.forEach(function(x){ if(m>=x[0]) r
 
 // ---------- state ----------
 var cat = A.store.get("upCat","mix"), state="lobby", round=0, total=0, results=[], cur=null, timeLeft=0, tickT=null, tried=null, bags={}, nextT=null;
-var climb = {shown:0, target:0};
+var climb = {shown:0, target:0, from:0, start:0, dur:1, slip:0};
 
 function bag(c){
   if(!bags[c] || !bags[c].length){
@@ -64,12 +64,12 @@ function lobby(){
     '<button class="btn hot" id="upStart">Start climb</button> <span class="info" style="margin-left:8px">or press Enter</span>';
   $("upStart").addEventListener("click", startRun);
   $("upRound").textContent="Ready"; $("upCat").textContent=catName(cat); $("upPts").textContent="0 m";
-  total=0; climb.target=0; climb.shown=0; setAlt();
+  total=0; resetClimb();
   renderCats();
 }
 
 function startRun(){
-  round=0; total=0; results=[]; climb.target=0;
+  round=0; total=0; results=[]; resetClimb();
   $("upLobby").classList.add("hidden"); $("upPlay").classList.remove("hidden");
   A.sfx("good"); nextPrompt();
 }
@@ -124,7 +124,7 @@ function resolve(hit, typed){
   if(state!=="ask") return;
   state="reveal"; clearInterval(tickT); $("upIn").disabled=true;
   var pts = hit ? hit.pts : 0;
-  total += pts; climb.target = Math.min(TOWER, total);
+  total += pts; startClimb(pts);
   results.push({q:cur.q, a: hit?hit.show:null, pts:pts});
   var list=cur.list, rarest=list[list.length-1];
   var common=list.slice(0,3).map(function(a){return "<b>"+A.esc(a.show)+"</b>";}).join(", ");
@@ -161,48 +161,159 @@ function finish(){
 }
 function again(){ A.closeModal(); startRun(); }
 
-// ---------- tower view ----------
-var tw, tctx, towerT=0;
-function setAlt(){ $("upAlt").textContent=Math.round(climb.shown)+" m"; $("upRank").textContent=rankFor(Math.round(climb.shown)); }
+// ---------- tower view + climb animation ----------
+// Drawn on a full-size canvas in chunky 3px art pixels. The camera and Clawd
+// move on whole screen pixels, so the climb glides instead of stepping.
+var tw, tctx, S = 3, MPX = 0.5;          // MPX: art pixels per metre
+var pops = [], banner = null, lineOff = 0, lastNow = 0, cam = 0, lastShown = 0;
+function ease(x){ return x<0.5 ? 4*x*x*x : 1-Math.pow(-2*x+2,3)/2; }
+function resetClimb(){ climb.shown=climb.target=climb.from=0; climb.slip=0; climb.dur=1; climb.start=0; pops=[]; banner=null; cam=0; lastShown=0; setAlt(); }
+function startClimb(pts){
+  var now = performance.now();
+  climb.from = climb.shown; climb.target = Math.min(TOWER, total);
+  climb.start = now; climb.dur = pts ? 1100 + pts*13 : 1;
+  if(pts) pops.push({text:"+"+pts, color: pts>=100?A.PAL.pink : pts>=70?A.PAL.violet : pts>=40?A.PAL.teal : A.PAL.amber, born:now, alt:climb.target, big:pts>=70});
+  else { climb.slip = now; pops.push({text:"SLIP!", color:A.PAL.pink, born:now, alt:climb.shown, big:false}); }
+}
+function setAlt(){
+  var m=Math.round(climb.shown), el=$("upAlt");
+  el.textContent=m+" m"; $("upRank").textContent=rankFor(m);
+  el.classList.toggle("ticking", climb.shown < climb.target);
+}
+function wrapWords(text, maxW){
+  var out=[], line="";
+  text.split(" ").forEach(function(w){ var t=line?line+" "+w:w; if(A.textWidth(t,1)>maxW && line){ out.push(line); line=w; } else line=t; });
+  if(line) out.push(line); return out;
+}
+
 function drawTower(now){
   requestAnimationFrame(drawTower);
+  var dt = Math.min(0.05, (now-lastNow)/1000 || 0.016); lastNow = now;
   if(A.current!=="uplink" || $("app").classList.contains("hidden")) return;
   var cw = tw.clientWidth, ch = tw.clientHeight; if(!cw||!ch) return;
-  var s = 3, W = Math.ceil(cw/s), H = Math.ceil(ch/s);
-  if(tw.width!==W||tw.height!==H){ tw.width=W; tw.height=H; }
-  var c=tctx, P=A.PAL, t=now/1000;
-  if(climb.shown < climb.target) climb.shown = Math.min(climb.target, climb.shown + Math.max(0.6,(climb.target-climb.shown)*0.04));
-  if(climb.shown > climb.target) climb.shown = climb.target;
+  if(tw.width!==cw||tw.height!==ch){ tw.width=cw; tw.height=ch; tctx.imageSmoothingEnabled=false; }
+  var c=tctx, P=A.PAL, t=now/1000, W=cw/S, H=ch/S;
+
+  // --- climb progress ---
+  var p = climb.dur ? Math.min(1, (now-climb.start)/climb.dur) : 1;
+  var prev = climb.shown;
+  climb.shown = climb.from + (climb.target-climb.from)*ease(p);
+  var speed = Math.abs(climb.shown-prev)/Math.max(dt,0.001);        // metres per second
+  // milestones: every 100 m crossed pops a banner
+  for(var m=100;m<=TOWER;m+=100) if(lastShown < m && climb.shown >= m){ banner={m:m, born:now}; A.sfx("good"); }
+  if(Math.floor(climb.shown/20) > Math.floor(lastShown/20)) A.sfx("tick");
+  lastShown = climb.shown;
   setAlt();
-  // 1 metre = 0.5 px; camera keeps Clawd ~60% down the view
-  var mpx = 0.5, groundY = H - 8, cy = groundY - climb.shown*mpx, cam = Math.max(0, (H*0.6) - cy);
-  c.fillStyle="#0a0818"; c.fillRect(0,0,W,H);
-  // distant stars drift with camera
-  for(var i=0;i<30;i++){ var sx=(i*37)%W, sy=((i*53 + cam*0.2)%H); c.fillStyle=(i%3?"#3b3470":"#8f86d8"); c.fillRect(sx,sy|0,1,1); }
-  var tx = Math.floor(W/2)-14, tw2=28, topY = groundY - TOWER*mpx + cam;
-  // tower body
-  c.fillStyle="#17132e"; c.fillRect(tx, topY, tw2, groundY+cam-topY);
-  c.fillStyle="#211b42"; c.fillRect(tx, topY, 2, groundY+cam-topY);
-  // windows
-  for(var y=topY+6; y<groundY+cam; y+=6){ if(y<-6||y>H) continue; for(var x=tx+5; x<tx+tw2-3; x+=5){ var on=((x*7+Math.floor(y-cam)*3)%11)<4; c.fillStyle=on?(((x+y)%3)?P.amber:P.teal):"#100d22"; c.fillRect(x,Math.floor(y),2,3); } }
-  // floor markers every 100m
-  for(var m=100;m<=TOWER;m+=100){ var my=Math.floor(groundY - m*mpx + cam); if(my<0||my>H) continue; c.fillStyle="#3a3270"; c.fillRect(tx-4,my,tw2+8,1); A.drawText(c, String(m), tx+tw2+2, my-8, 1, m<=climb.shown?P.amber:"#4a4380"); }
-  // antenna + beacon at the top
+  // slip wobble on timeouts
+  var slipY = 0, slipX = 0;
+  if(climb.slip){ var sp=(now-climb.slip)/900; if(sp<1){ slipY = Math.min(climb.shown*MPX, Math.sin(sp*Math.PI)*6); slipX = Math.sin(sp*40)*(1-sp)*2; } else climb.slip=0; }
+
+  // --- camera: keep Clawd ~62% down the view, eased ---
+  var groundY = H - 10, cy = groundY - climb.shown*MPX + slipY;
+  var want = Math.max(0, H*0.62 - cy);
+  cam += (want - cam) * Math.min(1, dt*8);
+  var camPx = Math.round(cam*S)/S;                       // snap to a screen pixel
+  function world(){ c.setTransform(S,0,0,S,0,Math.round(cam*S)); }
+  function screen(){ c.setTransform(S,0,0,S,0,0); }
+
+  // --- backdrop ---
+  c.setTransform(1,0,0,1,0,0);
+  var grd=c.createLinearGradient(0,0,0,ch); grd.addColorStop(0,"#0a0818"); grd.addColorStop(1,"#1d1236"); c.fillStyle=grd; c.fillRect(0,0,cw,ch);
+  screen();
+  for(var i=0;i<40;i++){ var sx=(i*37)%W, sy=(i*53 + camPx*0.25)%H; c.fillStyle=(i%3?"#3b3470":"#8f86d8"); c.fillRect(Math.floor(sx), Math.round(sy*S)/S, 1, 1); }
+  // distant skyline drifts slower than the tower (parallax)
+  c.fillStyle="#140f2a";
+  for(var b=0;b<8;b++){ var bh=30+((b*47)%40), bx=(b*W/7)-6; c.fillRect(Math.floor(bx), Math.round((H-bh+camPx*0.4)*S)/S, Math.floor(W/8), bh+200); }
+
+  // --- speed lines while climbing ---
+  lineOff += speed*MPX*dt*2.2;
+  if(speed>3){
+    c.globalAlpha=Math.min(0.55, speed/220);
+    for(var l=0;l<14;l++){
+      var lx = (l*13.7)%W, side = (lx > W/2-16 && lx < W/2+16) ? (lx < W/2 ? -18 : 18) : 0;
+      var ly = ((l*29.3 + lineOff) % (H+20)) - 20, len = 4 + Math.min(16, speed/12);
+      c.fillStyle = l%3 ? "#7c74c8" : P.teal; c.fillRect(Math.floor(lx+side), Math.round(ly*S)/S, 1/S*2, len);
+    }
+    c.globalAlpha=1;
+  }
+
+  // --- the tower ---
+  world();
+  var tx = Math.floor(W/2)-14, tw2=28, topY = groundY - TOWER*MPX;
+  c.fillStyle="#17132e"; c.fillRect(tx, topY, tw2, groundY-topY);
+  c.fillStyle="#211b42"; c.fillRect(tx, topY, 2, groundY-topY); c.fillRect(tx+tw2-1, topY, 1, groundY-topY);
+  var view0 = -cam-4, view1 = -cam+H+4;
+  for(var y=topY+6; y<groundY; y+=6){
+    if(y<view0||y>view1) continue;
+    var altHere = (groundY - y)/MPX;
+    for(var x=tx+5; x<tx+tw2-3; x+=5){
+      var seed=((x*7+Math.floor(y)*3)%11), passed = altHere <= climb.shown;
+      var on = passed ? seed<7 : seed<2;
+      c.fillStyle = on ? (passed ? ((x+Math.floor(y))%3 ? P.amber : P.teal) : "#3a3166") : "#100d22";
+      c.fillRect(x, y, 2, 3);
+    }
+  }
+  // floor markers every 100 m
+  for(var mm=100; mm<=TOWER; mm+=100){
+    var my = groundY - mm*MPX; if(my<view0||my>view1) continue;
+    var hit = mm<=climb.shown, flash = banner && banner.m===mm && now-banner.born<600;
+    c.fillStyle = flash ? "#ffffff" : hit ? P.amber : "#3a3270"; c.fillRect(tx-4, my, tw2+8, 1);
+    A.drawText(c, String(mm), tx+tw2+3, my-8, 1, hit ? P.amber : "#4a4380");
+  }
+  // antenna + beacon
   c.fillStyle="#2a2450"; c.fillRect(tx+13, topY-24, 2, 24); c.fillRect(tx+9, topY-14, 10, 1);
   if(Math.sin(t*4)>0){ c.fillStyle=P.red; c.fillRect(tx+13, topY-26, 2, 2); }
-  if(climb.shown>=600){ c.globalAlpha=0.25+0.15*Math.sin(t*6); c.fillStyle=P.teal; c.beginPath(); c.arc(tx+14, topY-25, 10, 0, 6.29); c.fill(); c.globalAlpha=1; }
-  // ground
-  c.fillStyle="#07060f"; c.fillRect(0, groundY+cam, W, H);
-  // Clawd on the tower face
-  var moving = climb.shown < climb.target;
-  var fr = moving ? (Math.floor(t*8)%2?"climbA":"climbB") : "stand";
-  A.drawClawd(c, tx+8, Math.floor(cy+cam-10), 1, fr, {armsUp: moving, blink:(t%3)<0.12});
+  if(climb.shown>=600){ c.globalAlpha=0.25+0.15*Math.sin(t*6); c.fillStyle=P.teal; c.beginPath(); c.arc(tx+14, topY-25, 12, 0, 6.29); c.fill(); c.globalAlpha=1; }
+  // street
+  c.fillStyle="#07060f"; c.fillRect(-10, groundY, W+20, 80);
+  c.fillStyle="#2a2450"; c.fillRect(-10, groundY, W+20, 1);
+
+  // --- Clawd ---
+  var moving = climb.shown < climb.target - 0.01;
+  var rate = moving ? Math.max(6, Math.min(16, speed/10)) : 0;
+  var fr = moving ? (Math.floor(t*rate)%2 ? "climbA":"climbB") : (climb.slip ? "climbB" : "stand");
+  var cx = Math.round((tx+8+slipX)*S)/S, cyy = Math.round((cy-10)*S)/S;
+  if(moving){ c.globalAlpha=0.25; A.drawClawd(c, cx, cyy+3, 1, fr, {armsUp:true}); c.globalAlpha=1; }   // motion smear
+  A.drawClawd(c, cx, cyy, 1, fr, {armsUp: moving, blink:(t%3)<0.12});
+  if(!moving && climb.shown>=TOWER){ c.fillStyle=P.amber; c.fillRect(cx+6, cyy-6, 1, 5); c.fillRect(cx+7, cyy-6, 3, 2); }  // flag at the top
+
+  // --- popups (+points) rise from Clawd and fade ---
+  pops = pops.filter(function(pp){ return now-pp.born < 2400; });
+  pops.forEach(function(pp){
+    var age=Math.max(0,(now-pp.born)/2400), sc=pp.big?2:1, txt=pp.text, w=A.textWidth(txt,sc);
+    var py = groundY - Math.min(pp.alt, climb.shown)*MPX - (pp.big?30:22) - age*22;
+    c.globalAlpha = age<0.75 ? 1 : (1-age)/0.25;
+    A.drawText(c, txt, Math.round((tx+14-w/2+1)*S)/S, Math.round((py+1)*S)/S, sc, "#07060f");
+    A.drawText(c, txt, Math.round((tx+14-w/2)*S)/S, Math.round(py*S)/S, sc, pp.color);
+    c.globalAlpha=1;
+  });
+
+  // --- milestone banner (screen-fixed) ---
+  screen();
+  if(banner){
+    var age2=(now-banner.born)/1800;
+    if(age2>=1) banner=null;
+    else {
+      var slide = age2<0.15 ? (1-age2/0.15) : age2>0.85 ? -(age2-0.85)/0.15 : 0;
+      var lines = wrapWords(rankFor(banner.m).toUpperCase(), W-8), bh2 = 22 + lines.length*8;
+      var by = Math.round((10 + slide*-30)*S)/S;
+      c.fillStyle="rgba(7,6,15,0.88)"; c.fillRect(0, by, W, bh2);
+      c.fillStyle=P.clawd; c.fillRect(0, by, W, 1); c.fillRect(0, by+bh2-1, W, 1);
+      var big=banner.m+" M", bw=A.textWidth(big,2);
+      A.drawText(c, big, Math.floor((W-bw)/2), by+4, 2, P.amber);
+      lines.forEach(function(ln,k){ A.drawText(c, ln, Math.floor((W-A.textWidth(ln,1))/2), by+20+k*8, 1, P.ink); });
+    }
+  }
   // rain
-  c.fillStyle="rgba(160,170,255,0.22)"; for(var r=0;r<26;r++){ var rx=(r*29 + t*20)%W, ry=(r*41 + t*110)%H; c.fillRect(rx|0, ry|0, 1, 3); }
+  c.fillStyle="rgba(160,170,255,0.22)";
+  for(var r=0;r<30;r++){ var rx=(r*29.3 + t*18)%W, ry=(r*41.7 + t*120 + camPx*0.6)%H; c.fillRect(Math.round(rx*S)/S, Math.round(ry*S)/S, 1/S*2, 3); }
+  c.setTransform(1,0,0,1,0,0);
 }
+
 
 // ---------- game hooks ----------
 A.games.uplink = {
+  _debug:function(){ return {pops:pops, climb:climb, banner:banner}; },
   init:function(){
     tw=$("tower"); tctx=tw.getContext("2d"); requestAnimationFrame(drawTower);
     $("upIn").addEventListener("keydown", function(e){ if(e.key==="Enter"){ e.preventDefault(); e.stopPropagation(); submit(); } });
