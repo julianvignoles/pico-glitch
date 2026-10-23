@@ -50,9 +50,18 @@
   resize();
 
   // ---------- input ----------
+  // Real immersive fullscreen — must be triggered by a user gesture, so we
+  // fire it on the first key/click (the same gesture that starts the game).
+  function goFullscreen() {
+    const el = document.documentElement;
+    if (!document.fullscreenElement && el.requestFullscreen) {
+      el.requestFullscreen().catch(() => {});
+    }
+  }
   const keys = {};
   let shootHeld = false, firePulse = false;
   addEventListener('keydown', e => {
+    goFullscreen();
     keys[e.key.toLowerCase()] = true;
     if ([' ','arrowleft','arrowright','arrowup','arrowdown'].includes(e.key.toLowerCase())) e.preventDefault();
     if (e.key === ' ') { shootHeld = true; }
@@ -66,6 +75,7 @@
   });
   let pointerX = null;
   addEventListener('pointerdown', e => {
+    goFullscreen();
     pointerX = e.clientX; shootHeld = true; firePulse = true;
     if (state === 'boot') advance();
     else if (state === 'dead') startGame();
@@ -85,7 +95,7 @@
     { at:45,  txt:'> emulating HID keyboard...' },
     { at:95,  txt:'> keystroke injection OK' },
     { at:150, txt:'> payload delivered' },
-    { at:210, txt:'!! YOU HAVE BEEN PICO'D !!' },
+    { at:210, txt:"!! YOU HAVE BEEN PICO'D !!" },
   ];
 
   // ---------- game objects ----------
