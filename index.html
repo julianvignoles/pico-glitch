@@ -25,7 +25,7 @@
   <canvas id="game"></canvas>
   <div id="crt"></div>
   <div id="flicker"></div>
-  <div id="hint">[MOVE] &lt; &gt; / A D&nbsp;&nbsp;&nbsp;[FIRE] SPACE / CLICK&nbsp;&nbsp;&nbsp;[PAUSE] P</div>
+  <div id="hint">[MOVE] &lt; &gt; / A D&nbsp;&nbsp;&nbsp;[FIRE] SPACE / CLICK&nbsp;&nbsp;&nbsp;[PAUSE] P&nbsp;&nbsp;&nbsp;[MUTE] M</div>
 <script>
 (() => {
   const view = document.getElementById("game");
@@ -58,21 +58,23 @@
   const keys = {};
   let shootHeld = false, firePulse = false, pointerX = null;
   addEventListener("keydown", e => {
-    goFullscreen();
+    goFullscreen(); startAudio();
     const k = e.key.toLowerCase(); keys[k] = true;
     if ([" ", "arrowleft", "arrowright", "arrowup", "arrowdown"].includes(k)) e.preventDefault();
     if (k === " ") shootHeld = true;
+    if (k === "m") { toggleMute(); return; }
     if (state === "boot" || state === "dead") startGame();
     else if (k === "p" && state === "play") paused = !paused;
   });
   addEventListener("keyup", e => { const k = e.key.toLowerCase(); keys[k] = false; if (k === " ") shootHeld = false; });
-  addEventListener("pointerdown", e => { goFullscreen(); pointerX = e.clientX; shootHeld = true; firePulse = true; if (state === "boot" || state === "dead") startGame(); });
+  addEventListener("pointerdown", e => { goFullscreen(); startAudio(); pointerX = e.clientX; shootHeld = true; firePulse = true; if (state === "boot" || state === "dead") startGame(); });
   addEventListener("pointermove", e => { if (pointerX !== null) pointerX = e.clientX; });
   addEventListener("pointerup", () => { shootHeld = false; });
 
   // ---------- state ----------
   let state = "boot", paused = false, t = 0;
   let shakeMag = 0, shX = 0, shY = 0, hitFlash = 0;
+  let actx = null, master = null, droneGain = null, droneFilter = null, muted = false, audioStarted = false;
   let player, bullets, enemies, particles, bubbles, wallSeed, stars;
   let depth, best = +(localStorage.getItem("neodive_best") || 0), lives, spawnTimer, diff, fireCd, combo, comboTimer;
 
@@ -95,7 +97,7 @@
     player = { x: bw / 2, y: bh - 22, w: 8 };
     bullets = []; enemies = []; particles = [];
     depth = 0; lives = 3; spawnTimer = 0; diff = 1; fireCd = 0; combo = 0; comboTimer = 0;
-    pointerX = null; shakeMag = 0;
+    pointerX = null; shakeMag = 0; sfxDive();
   }
 
   function spawnEnemy() {
@@ -112,6 +114,44 @@
     for (let i = 0; i < n; i++) { const a = Math.random() * 6.28, s = Math.random() * (spd || 2) + 0.5; particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 1, color }); }
   }
   function shake(m) { shakeMag = Math.min(7, shakeMag + m); }
+
+  // ---------- audio (WebAudio, no files) ----------
+  function startAudio() {
+    if (audioStarted) { if (actx && actx.state === "suspended") actx.resume(); return; }
+    try {
+      actx = new (window.AudioContext || window.webkitAudioContext)();
+      master = actx.createGain(); master.gain.value = muted ? 0 : 0.4; master.connect(actx.destination);
+      droneFilter = actx.createBiquadFilter(); droneFilter.type = "lowpass"; droneFilter.frequency.value = 420;
+      droneGain = actx.createGain(); droneGain.gain.value = 0;
+      droneFilter.connect(droneGain); droneGain.connect(master);
+      [55, 55.4, 82.5].forEach(f => { const o = actx.createOscillator(); o.type = "sawtooth"; o.frequency.value = f; o.connect(droneFilter); o.start(); });
+      audioStarted = true;
+    } catch (e) { actx = null; }
+  }
+  function toggleMute() { muted = !muted; if (master && actx) master.gain.setTargetAtTime(muted ? 0 : 0.4, actx.currentTime, 0.05); }
+  function tone(freq, dur, type, vol, slideTo) {
+    if (!actx || muted) return;
+    const o = actx.createOscillator(), g = actx.createGain(), now = actx.currentTime;
+    o.type = type || "square"; o.frequency.setValueAtTime(freq, now);
+    if (slideTo) o.frequency.exponentialRampToValueAtTime(Math.max(20, slideTo), now + dur);
+    g.gain.setValueAtTime(vol || 0.2, now); g.gain.exponentialRampToValueAtTime(0.0008, now + dur);
+    o.connect(g); g.connect(master); o.start(now); o.stop(now + dur + 0.02);
+  }
+  function noise(dur, vol, cut) {
+    if (!actx || muted) return;
+    const len = (actx.sampleRate * dur) | 0, bufA = actx.createBuffer(1, len, actx.sampleRate), d = bufA.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    const n = actx.createBufferSource(); n.buffer = bufA;
+    const f = actx.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = cut || 1400;
+    const g = actx.createGain(); g.gain.value = vol || 0.2;
+    n.connect(f); f.connect(g); g.connect(master); n.start(); n.stop(actx.currentTime + dur);
+  }
+  function sfxShoot() { tone(900, 0.07, "square", 0.07, 320); }
+  function sfxKill() { noise(0.18, 0.18, 1600); tone(320, 0.18, "square", 0.13, 70); }
+  function sfxCombo(c) { tone(420 + c * 50, 0.06, "triangle", 0.1); }
+  function sfxHit() { tone(150, 0.3, "sawtooth", 0.28, 45); noise(0.25, 0.18, 800); }
+  function sfxDeath() { tone(300, 0.7, "sawtooth", 0.3, 40); }
+  function sfxDive() { tone(200, 0.4, "square", 0.13, 760); }
 
   // ---------- buffer draw helpers ----------
   function bText(txt, x, y, size, color, align) {
@@ -191,6 +231,11 @@
     shakeMag *= 0.85; shX = (Math.random() - 0.5) * shakeMag * PIX; shY = (Math.random() - 0.5) * shakeMag * PIX;
     for (const d of bubbles) { d.y -= d.sp; if (d.y < 0) { d.y = bh; d.x = Math.random() * bw; } }
     if (hitFlash > 0) hitFlash--;
+    if (actx) {
+      const dep = depth || 0;
+      droneGain.gain.setTargetAtTime((state === "play" && !paused) ? 0.45 : 0.0, actx.currentTime, 0.25);
+      droneFilter.frequency.setTargetAtTime(Math.max(130, 460 - dep * 0.03), actx.currentTime, 0.3);
+    }
 
     if (state !== "play" || paused) {
       if (particles) { for (const p of particles) { p.x += p.vx; p.y += p.vy; p.vy += 0.04; p.life -= 0.03; } particles = particles.filter(p => p.life > 0); }
@@ -205,7 +250,7 @@
     player.x = Math.max(player.w, Math.min(bw - player.w, player.x));
 
     fireCd--;
-    if ((shootHeld || firePulse) && fireCd <= 0) { bullets.push({ x: player.x, y: player.y - 8 }); fireCd = 8; }
+    if ((shootHeld || firePulse) && fireCd <= 0) { bullets.push({ x: player.x, y: player.y - 8 }); fireCd = 8; sfxShoot(); }
     firePulse = false;
     for (const bl of bullets) bl.y -= 3.6;
     bullets = bullets.filter(bl => bl.y > -6);
@@ -217,7 +262,7 @@
       if (e.dead) continue;
       if (Math.abs(bl.x - e.x) < e.size && Math.abs(bl.y - e.y) < e.size) {
         e.hp--; bl.y = -99; boom(bl.x, e.y, e.hue, 4, 1.5);
-        if (e.hp <= 0) { e.dead = true; combo++; comboTimer = 80; depth += 25 * Math.max(1, combo); boom(e.x, e.y, e.hue, 14, 3); shake(2); }
+        if (e.hp <= 0) { e.dead = true; combo++; comboTimer = 80; depth += 25 * Math.max(1, combo); boom(e.x, e.y, e.hue, 14, 3); shake(2); sfxKill(); if (combo > 1) sfxCombo(combo); }
       }
     }
     bullets = bullets.filter(bl => bl.y > -6);
@@ -235,9 +280,9 @@
   }
 
   function loseLife(x, y) {
-    lives--; combo = 0; hitFlash = 13; shake(6); boom(x, y, MG, 20, 3.5);
+    lives--; combo = 0; hitFlash = 13; shake(6); boom(x, y, MG, 20, 3.5); sfxHit();
     flick.style.opacity = "0.55"; setTimeout(() => flick.style.opacity = "0", 90);
-    if (lives <= 0) { state = "dead"; const d = depth | 0; if (d > best) { best = d; localStorage.setItem("neodive_best", best); } }
+    if (lives <= 0) { state = "dead"; sfxDeath(); const d = depth | 0; if (d > best) { best = d; localStorage.setItem("neodive_best", best); } }
   }
 
   // ---------- render to buffer, then blit scaled ----------
